@@ -213,9 +213,13 @@ Global options (before or after command):
 				}
 				flat = append(flat, m)
 			}
+			output := map[string]any{
+				"count":   len(devices),
+				"devices": flat,
+			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			enc.Encode(flat)
+			enc.Encode(output)
 		} else {
 			for _, d := range devices {
 				fmt.Printf("%s\t%s\t%s:%d\n", d.Info.Alias, d.Info.DeviceType, d.IP, d.Port)
