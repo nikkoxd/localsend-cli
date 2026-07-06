@@ -28,6 +28,8 @@ Send files to a device:
 localsend-cli send [--to <alias|ip:port>] [files...]
 ```
 
+The CLI will auto-discover a device if one was not specified with the flag `--to`.
+
 Start a server to receive files:
 
 ```
