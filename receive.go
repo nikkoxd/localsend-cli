@@ -82,13 +82,13 @@ func receive(cfg *Config, announceInterval time.Duration) error {
 			cfg.Logger.Infof("  - %s (%d bytes)\n", f.FileName, f.Size)
 		}
 
-		fmt.Fprintf(os.Stderr, "\nIncoming transfer from: %s (%s)\n", req.Info.Alias, req.Info.DeviceType)
-		fmt.Fprintf(os.Stderr, "Files:\n")
+		fmt.Fprintf(os.Stdout, "\nIncoming transfer from: %s (%s)\n", req.Info.Alias, req.Info.DeviceType)
+		fmt.Fprintf(os.Stdout, "Files:\n")
 		for _, f := range req.Files {
-			fmt.Fprintf(os.Stderr, "  - %s (%d bytes)\n", f.FileName, f.Size)
+			fmt.Fprintf(os.Stdout, "  - %s (%d bytes)\n", f.FileName, f.Size)
 		}
-		fmt.Fprintf(os.Stderr, "Accept? (yes/no): ")
-		os.Stderr.Sync()
+		fmt.Fprintf(os.Stdout, "Accept? (yes/no): ")
+		os.Stdout.Sync()
 
 		stdinMu.Lock()
 		line, err := reader.ReadString('\n')
@@ -101,7 +101,7 @@ func receive(cfg *Config, announceInterval time.Duration) error {
 		line = strings.TrimSpace(strings.ToLower(line))
 		if line != "yes" && line != "y" {
 			cfg.Logger.Infof("Transfer denied by user\n")
-			fmt.Fprintf(os.Stderr, "Transfer denied.\n")
+			fmt.Fprintf(os.Stdout, "Transfer denied.\n")
 			http.Error(w, "Rejected", http.StatusForbidden)
 			return
 		}
@@ -121,7 +121,7 @@ func receive(cfg *Config, announceInterval time.Duration) error {
 		sessionMu.Unlock()
 
 		cfg.Logger.Infof("Transfer accepted, session=%s\n", sessionID)
-		fmt.Fprintf(os.Stderr, "Transfer accepted.\n")
+		fmt.Fprintf(os.Stdout, "Transfer accepted.\n")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(PrepareUploadResponse{
 			SessionID: sessionID,

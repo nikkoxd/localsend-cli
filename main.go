@@ -112,7 +112,7 @@ Global options (before or after command):
 	} else if *verbose {
 		logLevel = LevelDebug
 	}
-	logger := NewLogger(os.Stderr, logLevel)
+	logger := NewLogger(os.Stdout, logLevel)
 
 	cfg := &Config{
 		Alias:         *alias,
