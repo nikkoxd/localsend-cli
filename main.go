@@ -208,7 +208,7 @@ Global options (before or after command):
 			logger.Infof("Transfer complete\n")
 		}
 	case "receive":
-		if err := receive(cfg, *announceInterval); err != nil {
+		if err := receive(cfg, *announceInterval, *jsonOut); err != nil {
 			logger.Errorf("Receive failed: %v\n", err)
 			os.Exit(1)
 		}

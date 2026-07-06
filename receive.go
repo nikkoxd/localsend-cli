@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,11 +16,42 @@ import (
 )
 
 // receive starts an HTTPS server to accept incoming transfers.
-// It prompts on stderr and reads stdin for accept/deny decisions.
+// It prompts on stdout and reads stdin for accept/deny decisions.
 // It also periodically sends multicast announcements so other devices can find it.
-func receive(cfg *Config, announceInterval time.Duration) error {
-	var stdinMu sync.Mutex
+func receive(cfg *Config, announceInterval time.Duration, jsonOut bool) error {
 	reader := bufio.NewReader(os.Stdin)
+
+	// ── Single stdin reader goroutine ─────────────────────────────
+	// Only ONE goroutine ever touches bufio.Reader.
+	// It delivers lines to the currently active prompt, or discards them.
+	var (
+		promptMu     sync.Mutex
+		promptCh     chan string     // nil when no prompt is active
+		promptCancel chan struct{}   // closed to cancel the active prompt
+	)
+
+	go func() {
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			trimmed := strings.TrimSpace(strings.ToLower(line))
+
+			promptMu.Lock()
+			ch := promptCh
+			promptMu.Unlock()
+
+			if ch != nil {
+				select {
+				case ch <- trimmed:
+				default:
+					// buffer full (shouldn't happen with cap 1), discard
+				}
+			}
+			// if no prompt is active, the line is simply discarded
+		}
+	}()
 
 	// Start background announcement loop
 	stopAnnounce := make(chan struct{})
@@ -77,32 +109,86 @@ func receive(cfg *Config, announceInterval time.Duration) error {
 			return
 		}
 
-		cfg.Logger.Infof("Incoming transfer from %s (%s) at %s\n", req.Info.Alias, req.Info.DeviceType, r.RemoteAddr)
-		for _, f := range req.Files {
-			cfg.Logger.Infof("  - %s (%d bytes)\n", f.FileName, f.Size)
+		// Extract remote host (strip port)
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if host == "" {
+			host = r.RemoteAddr
 		}
 
-		fmt.Fprintf(os.Stdout, "\nIncoming transfer from: %s (%s)\n", req.Info.Alias, req.Info.DeviceType)
-		fmt.Fprintf(os.Stdout, "Files:\n")
-		for _, f := range req.Files {
-			fmt.Fprintf(os.Stdout, "  - %s (%d bytes)\n", f.FileName, f.Size)
+		if jsonOut {
+			// ── JSON mode: single JSON line with transfer info ──
+			type incomingFile struct {
+				Name string `json:"name"`
+				Size int64  `json:"size"`
+			}
+			type incomingTransfer struct {
+				Alias      string         `json:"alias"`
+				DeviceType string         `json:"deviceType"`
+				IP         string         `json:"ip"`
+				Files      []incomingFile `json:"files"`
+			}
+			var files []incomingFile
+			for _, f := range req.Files {
+				files = append(files, incomingFile{Name: f.FileName, Size: f.Size})
+			}
+			payload := incomingTransfer{
+				Alias:      req.Info.Alias,
+				DeviceType: req.Info.DeviceType,
+				IP:         host,
+				Files:      files,
+			}
+			data, _ := json.Marshal(payload)
+			fmt.Fprintln(os.Stdout, string(data))
+			os.Stdout.Sync()
+		} else {
+			// ── Human mode: print once, no logger duplication ──
+			fmt.Fprintf(os.Stdout, "\nIncoming transfer from: %s (%s) at %s\n", req.Info.Alias, req.Info.DeviceType, host)
+			fmt.Fprintf(os.Stdout, "Files:\n")
+			for _, f := range req.Files {
+				fmt.Fprintf(os.Stdout, "  - %s (%d bytes)\n", f.FileName, f.Size)
+			}
 		}
+
+		// ── Prompt in BOTH modes, but cancellable ──
 		fmt.Fprintf(os.Stdout, "Accept? (yes/no): ")
 		os.Stdout.Sync()
 
-		stdinMu.Lock()
-		line, err := reader.ReadString('\n')
-		stdinMu.Unlock()
-		if err != nil {
-			cfg.Logger.Errorf("Failed to read stdin: %v\n", err)
-			http.Error(w, "Server error", http.StatusInternalServerError)
-			return
+		// Set up prompt channels for this transfer
+		myPromptCh := make(chan string, 1)
+		myCancel := make(chan struct{})
+
+		promptMu.Lock()
+		// If another prompt is still active (e.g. previous transfer), cancel it
+		if promptCancel != nil {
+			close(promptCancel)
 		}
-		line = strings.TrimSpace(strings.ToLower(line))
-		if line != "yes" && line != "y" {
-			cfg.Logger.Infof("Transfer denied by user\n")
-			fmt.Fprintf(os.Stdout, "Transfer denied.\n")
-			http.Error(w, "Rejected", http.StatusForbidden)
+		promptCh = myPromptCh
+		promptCancel = myCancel
+		promptMu.Unlock()
+
+		// Clean up when this handler finishes
+		defer func() {
+			promptMu.Lock()
+			if promptCh == myPromptCh {
+				promptCh = nil
+				promptCancel = nil
+			}
+			promptMu.Unlock()
+		}()
+
+		var line string
+		select {
+		case line = <-myPromptCh:
+			if line != "yes" && line != "y" {
+				fmt.Fprintf(os.Stdout, "Transfer denied.\n")
+				http.Error(w, "Rejected", http.StatusForbidden)
+				return
+			}
+			fmt.Fprintf(os.Stdout, "Transfer accepted.\n")
+		case <-myCancel:
+			// \n moves to a new line so the old prompt is visually cleared
+			fmt.Fprintf(os.Stdout, "\nTransfer cancelled by sender.\n")
+			http.Error(w, "Cancelled", http.StatusForbidden)
 			return
 		}
 
@@ -120,8 +206,7 @@ func receive(cfg *Config, announceInterval time.Duration) error {
 		}
 		sessionMu.Unlock()
 
-		cfg.Logger.Infof("Transfer accepted, session=%s\n", sessionID)
-		fmt.Fprintf(os.Stdout, "Transfer accepted.\n")
+		cfg.Logger.Debugf("Transfer accepted, session=%s\n", sessionID)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(PrepareUploadResponse{
 			SessionID: sessionID,
@@ -179,10 +264,10 @@ func receive(cfg *Config, announceInterval time.Duration) error {
 		defer out.Close()
 
 		pw := &progressWriter{
-			Writer:       out,
-			Total:        meta.Size,
-			Logger:       cfg.Logger,
-			FileName:     fileName,
+			Writer:   out,
+			Total:    meta.Size,
+			Logger:   cfg.Logger,
+			FileName: fileName,
 		}
 
 		n, err := io.Copy(pw, r.Body)
@@ -204,6 +289,15 @@ func receive(cfg *Config, announceInterval time.Duration) error {
 		sessionMu.Lock()
 		activeSession = nil
 		sessionMu.Unlock()
+
+		// Signal any active prompt to abort
+		promptMu.Lock()
+		if promptCancel != nil {
+			close(promptCancel)
+			promptCancel = nil
+		}
+		promptMu.Unlock()
+
 		cfg.Logger.Debugf("Session cancelled\n")
 		w.WriteHeader(http.StatusOK)
 	})
@@ -244,4 +338,3 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	}
 	return n, err
 }
-
