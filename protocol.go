@@ -3,15 +3,22 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 )
 
 const (
 	protocolVersion      = "2.1"
 	defaultMulticastAddr = "224.0.0.167:53317"
 	defaultPort          = 53317
-	defaultAlias         = "LocalSend CLI"
-	defaultDeviceType    = "headless"
+	defaultDeviceType    = "desktop"
 )
+
+var defaultAlias = func() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "LocalSend CLI"
+}()
 
 // DeviceInfo represents the device announcement and registration payload.
 type DeviceInfo struct {
