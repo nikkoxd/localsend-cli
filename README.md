@@ -25,7 +25,7 @@ Use flag `--json` to print the info about discovered devices into stdout as JSON
 Send files to a device:
 
 ```
-localsend-cli send [--to <alias|ip:port>] [filenames]
+localsend-cli send [--to <alias|ip:port>] [files...]
 ```
 
 Start a server to receive files:
