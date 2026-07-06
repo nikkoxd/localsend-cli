@@ -14,9 +14,17 @@ import (
 	"time"
 )
 
-func sendFiles(cfg *Config, targetAddr string, files []string, pin string) error {
+// SendResult holds the result of a send operation for JSON output.
+type SendResult struct {
+	Success bool     `json:"success"`
+	Target  string   `json:"target"`
+	Files   []string `json:"files"`
+	Error   string   `json:"error,omitempty"`
+}
+
+func sendFiles(cfg *Config, targetAddr string, files []string, pin string, jsonOut bool) error {
 	// Use a longer timeout for prepare-upload since receiver waits for stdin
-	prepareClient := newHTTPClientWithTimeout(60 * time.Second)
+	prepareClient := newHTTPClientWithTimeout(60*time.Second)
 	// Normal client for uploads
 	client := newHTTPClient()
 
@@ -28,14 +36,18 @@ func sendFiles(cfg *Config, targetAddr string, files []string, pin string) error
 			return fmt.Errorf("stat %s: %w", path, err)
 		}
 		id := generateFileID()
+		fileType := mime.TypeByExtension(filepath.Ext(path))
+		if fileType == "" {
+			fileType = "application/octet-stream"
+		}
 		fileMap[id] = FileMetadata{
 			ID:       id,
 			FileName: filepath.Base(path),
 			Size:     info.Size(),
-			FileType: mime.TypeByExtension(filepath.Ext(path)),
+			FileType: fileType,
 		}
 		idToPath[id] = path
-		cfg.Logger.Debugf("Prepared file %s -> id=%s size=%d\n", path, id, info.Size())
+		cfg.Logger.Debugf("Prepared file %s -> id=%s size=%d type=%s\n", path, id, info.Size(), fileType)
 	}
 
 	reqBody := PrepareUploadRequest{
@@ -47,11 +59,11 @@ func sendFiles(cfg *Config, targetAddr string, files []string, pin string) error
 			Fingerprint: cfg.Fingerprint,
 			Port:        cfg.Port,
 			Protocol:    cfg.Protocol,
-			Download:    false,
 		},
 		Files: fileMap,
 	}
 	data, _ := json.Marshal(reqBody)
+	cfg.Logger.Debugf("Prepare-upload payload: %s\n", string(data))
 
 	url := fmt.Sprintf("https://%s/api/localsend/v2/prepare-upload", targetAddr)
 	if pin != "" {
@@ -94,10 +106,10 @@ func sendFiles(cfg *Config, targetAddr string, files []string, pin string) error
 		stat, _ := f.Stat()
 
 		pr := &progressReader{
-			Reader:   f,
-			Total:    stat.Size(),
-			Logger:   cfg.Logger,
-			FileName: meta.FileName,
+			Reader:    f,
+			Total:     stat.Size(),
+			Logger:    cfg.Logger,
+			FileName:  meta.FileName,
 		}
 
 		req, err := http.NewRequest("POST", uploadURL, pr)
@@ -150,3 +162,4 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 	}
 	return n, err
 }
+

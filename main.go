@@ -182,11 +182,31 @@ Global options (before or after command):
 			*toAddr = fmt.Sprintf("%s:%d", target.IP, target.Port)
 			logger.Infof("Resolved alias %q to %s\n", target.Info.Alias, *toAddr)
 		}
-		if err := sendFiles(cfg, *toAddr, files, *pin); err != nil {
-			logger.Errorf("Send failed: %v\n", err)
-			os.Exit(1)
+		err := sendFiles(cfg, *toAddr, files, *pin, *jsonOut)
+		if *jsonOut {
+			result := SendResult{
+				Target: *toAddr,
+				Files:  files,
+			}
+			if err != nil {
+				result.Success = false
+				result.Error = err.Error()
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				enc.Encode(result)
+				os.Exit(1)
+			}
+			result.Success = true
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			enc.Encode(result)
+		} else {
+			if err != nil {
+				logger.Errorf("Send failed: %v\n", err)
+				os.Exit(1)
+			}
+			logger.Infof("Transfer complete\n")
 		}
-		logger.Infof("Transfer complete\n")
 	case "receive":
 		if err := receive(cfg, *announceInterval); err != nil {
 			logger.Errorf("Receive failed: %v\n", err)
