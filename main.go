@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -22,6 +23,8 @@ func main() {
 		verbose          = flag.Bool("v", false, "Enable verbose (debug) logging")
 		quiet            = flag.Bool("q", false, "Suppress non-error log output")
 		announceInterval = flag.Duration("announce", 5*time.Second, "Interval between multicast announcements in receive mode")
+		bindIP           = flag.String("bind", "", "IP address to bind to (auto-detected if empty)")
+		iface            = flag.String("iface", "", "Network interface to use (e.g., eth0, wlan0, en0)")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage: localsend-cli [options] <command> [options] [files...]
@@ -37,14 +40,12 @@ Global options (before or after command):
 	}
 
 	// Custom parsing: allow flags before AND after the subcommand
-	// First, find where the subcommand is (first non-flag arg)
-	cmdIdx := 1 // skip program name
+	cmdIdx := 1
 	for cmdIdx < len(os.Args) {
 		arg := os.Args[cmdIdx]
 		if !strings.HasPrefix(arg, "-") {
 			break
 		}
-		// Skip flag values (e.g., -to value)
 		if arg == "-to" || arg == "--to" ||
 			arg == "-alias" || arg == "--alias" ||
 			arg == "-port" || arg == "--port" ||
@@ -52,7 +53,9 @@ Global options (before or after command):
 			arg == "-dir" || arg == "--dir" ||
 			arg == "-timeout" || arg == "--timeout" ||
 			arg == "-pin" || arg == "--pin" ||
-			arg == "-announce" || arg == "--announce" {
+			arg == "-announce" || arg == "--announce" ||
+			arg == "-bind" || arg == "--bind" ||
+			arg == "-iface" || arg == "--iface" {
 			cmdIdx++
 			if cmdIdx < len(os.Args) && !strings.HasPrefix(os.Args[cmdIdx], "-") {
 				cmdIdx++
@@ -64,13 +67,10 @@ Global options (before or after command):
 		}
 	}
 
-	// Parse all flags (both before and after subcommand)
 	var allArgs []string
 	allArgs = append(allArgs, os.Args[0])
 	if cmdIdx < len(os.Args) {
-		// Flags before command
 		allArgs = append(allArgs, os.Args[1:cmdIdx]...)
-		// Flags after command
 		allArgs = append(allArgs, os.Args[cmdIdx+1:]...)
 	} else {
 		allArgs = append(allArgs, os.Args[1:]...)
@@ -82,14 +82,11 @@ Global options (before or after command):
 		os.Exit(1)
 	}
 	cmd := os.Args[cmdIdx]
-	// Remaining args after command (files, etc.)
 	remainingArgs := os.Args[cmdIdx+1:]
-	// Filter out any flags from remainingArgs (they were already parsed)
 	var files []string
 	for i := 0; i < len(remainingArgs); i++ {
 		arg := remainingArgs[i]
 		if strings.HasPrefix(arg, "-") {
-			// Skip flag and its value
 			if arg == "-to" || arg == "--to" ||
 				arg == "-alias" || arg == "--alias" ||
 				arg == "-port" || arg == "--port" ||
@@ -97,7 +94,9 @@ Global options (before or after command):
 				arg == "-dir" || arg == "--dir" ||
 				arg == "-timeout" || arg == "--timeout" ||
 				arg == "-pin" || arg == "--pin" ||
-				arg == "-announce" || arg == "--announce" {
+				arg == "-announce" || arg == "--announce" ||
+				arg == "-bind" || arg == "--bind" ||
+				arg == "-iface" || arg == "--iface" {
 				i++
 			}
 			continue
@@ -105,7 +104,6 @@ Global options (before or after command):
 		files = append(files, arg)
 	}
 
-	// Configure logger
 	logLevel := LevelInfo
 	if *quiet {
 		logLevel = LevelError
@@ -113,6 +111,25 @@ Global options (before or after command):
 		logLevel = LevelDebug
 	}
 	logger := NewLogger(os.Stdout, logLevel)
+
+	// Resolve bind IP / interface
+	if *iface != "" {
+		ip, err := getInterfaceIP(*iface)
+		if err != nil {
+			logger.Errorf("Failed to get IP for interface %s: %v\n", *iface, err)
+			os.Exit(1)
+		}
+		*bindIP = ip
+		logger.Debugf("Using interface %s with IP %s\n", *iface, ip)
+	} else if *bindIP == "" {
+		ip, err := autoDetectIP()
+		if err != nil {
+			logger.Debugf("Auto-detect IP failed: %v, using all interfaces\n", err)
+		} else {
+			*bindIP = ip
+			logger.Debugf("Auto-detected bind IP: %s\n", ip)
+		}
+	}
 
 	cfg := &Config{
 		Alias:         *alias,
@@ -123,6 +140,29 @@ Global options (before or after command):
 		DeviceType:    defaultDeviceType,
 		DeviceModel:   "Go CLI",
 		Logger:        logger,
+		BindIP:        *bindIP,
+	}
+
+	// Find interface for BindIP (needed for multicast)
+	if cfg.BindIP != "" {
+		ifaces, _ := net.Interfaces()
+		for i := range ifaces {
+			addrs, _ := ifaces[i].Addrs()
+			for _, a := range addrs {
+				if ipnet, ok := a.(*net.IPNet); ok {
+					if ipnet.IP.String() == cfg.BindIP {
+						cfg.BindIface = &ifaces[i]
+						break
+					}
+				}
+			}
+			if cfg.BindIface != nil {
+				break
+			}
+		}
+		if cfg.BindIface != nil {
+			logger.Debugf("Bound to interface: %s\n", cfg.BindIface.Name)
+		}
 	}
 
 	if err := os.MkdirAll(cfg.DownloadDir, 0755); err != nil {
@@ -131,7 +171,7 @@ Global options (before or after command):
 	}
 
 	logger.Debugf("Generating self-signed TLS certificate...\n")
-	cert, certDER, fingerprint, err := generateSelfSignedCert()
+	cert, certDER, fingerprint, err := generateSelfSignedCert(cfg.BindIP)
 	if err != nil {
 		logger.Errorf("Failed to generate TLS certificate: %v\n", err)
 		os.Exit(1)
@@ -158,7 +198,6 @@ Global options (before or after command):
 			*toAddr = fmt.Sprintf("%s:%d", target.IP, target.Port)
 			logger.Infof("Auto-selected device: %s (%s)\n", target.Info.Alias, *toAddr)
 		} else if !strings.Contains(*toAddr, ":") {
-			// -to is an alias, not an IP:port
 			logger.Infof("Looking up alias %q...\n", *toAddr)
 			devices := discover(cfg, *timeout)
 			var matches []DiscoveredDevice
@@ -217,7 +256,6 @@ Global options (before or after command):
 		devices := discover(cfg, *timeout)
 		logger.Infof("Found %d device(s)\n", len(devices))
 		if *jsonOut {
-			// Flatten: merge IP/Port into DeviceInfo for cleaner output
 			var flat []map[string]any
 			for _, d := range devices {
 				m := map[string]any{
@@ -251,3 +289,69 @@ Global options (before or after command):
 	}
 }
 
+func getInterfaceIP(name string) (string, error) {
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		return "", err
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return "", err
+	}
+	for _, a := range addrs {
+		if ipnet, ok := a.(*net.IPNet); ok {
+			if ip4 := ipnet.IP.To4(); ip4 != nil {
+				return ip4.String(), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no IPv4 address found on interface %s", name)
+}
+
+func autoDetectIP() (string, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		name := strings.ToLower(iface.Name)
+		if strings.HasPrefix(name, "utun") ||
+			strings.HasPrefix(name, "tun") ||
+			strings.HasPrefix(name, "wg") ||
+			strings.HasPrefix(name, "ppp") ||
+			strings.Contains(name, "vpn") {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok {
+				if ip4 := ipnet.IP.To4(); ip4 != nil {
+					if isPrivateIPv4(ip4) {
+						return ip4.String(), nil
+					}
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("no suitable non-VPN interface found")
+}
+
+func isPrivateIPv4(ip net.IP) bool {
+	privateBlocks := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	for _, block := range privateBlocks {
+		_, cidr, _ := net.ParseCIDR(block)
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}

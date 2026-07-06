@@ -17,7 +17,7 @@ import (
 
 // generateSelfSignedCert creates a self-signed ECDSA certificate.
 // It returns the TLS certificate, raw DER bytes, and SHA-256 fingerprint (hex).
-func generateSelfSignedCert() (tls.Certificate, []byte, string, error) {
+func generateSelfSignedCert(bindIP string) (tls.Certificate, []byte, string, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, nil, "", err
@@ -36,13 +36,19 @@ func generateSelfSignedCert() (tls.Certificate, []byte, string, error) {
 		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
 	}
 
-	addrs, _ := net.InterfaceAddrs()
-	for _, a := range addrs {
-		if ipnet, ok := a.(*net.IPNet); ok {
-			if ip4 := ipnet.IP.To4(); ip4 != nil {
-				template.IPAddresses = append(template.IPAddresses, ip4)
-			} else if ipnet.IP.To16() != nil {
-				template.IPAddresses = append(template.IPAddresses, ipnet.IP)
+	if bindIP != "" {
+		if ip := net.ParseIP(bindIP); ip != nil {
+			template.IPAddresses = append(template.IPAddresses, ip)
+		}
+	} else {
+		addrs, _ := net.InterfaceAddrs()
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok {
+				if ip4 := ipnet.IP.To4(); ip4 != nil {
+					template.IPAddresses = append(template.IPAddresses, ip4)
+				} else if ipnet.IP.To16() != nil {
+					template.IPAddresses = append(template.IPAddresses, ipnet.IP)
+				}
 			}
 		}
 	}
@@ -67,4 +73,3 @@ func generateSelfSignedCert() (tls.Certificate, []byte, string, error) {
 	fingerprint := sha256.Sum256(certDER)
 	return tlsCert, certDER, hex.EncodeToString(fingerprint[:]), nil
 }
-

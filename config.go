@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"net"
 	"os"
 	"path/filepath"
 )
@@ -19,6 +20,8 @@ type Config struct {
 	TLSCert       tls.Certificate
 	CertDER       []byte
 	Logger        *Logger
+	BindIP        string
+	BindIface     *net.Interface
 }
 
 func defaultDownloadDir() string {
@@ -28,4 +31,3 @@ func defaultDownloadDir() string {
 	}
 	return filepath.Join(home, "Downloads")
 }
-

@@ -12,7 +12,6 @@ import (
 	"time"
 )
 
-// discover performs UDP multicast discovery only.
 func discover(cfg *Config, timeout time.Duration) []DiscoveredDevice {
 	var mu sync.Mutex
 	found := make(map[string]DiscoveredDevice)
@@ -31,15 +30,22 @@ func discover(cfg *Config, timeout time.Duration) []DiscoveredDevice {
 	return results
 }
 
-// sendMulticastAnnouncement sends a single UDP multicast announcement
-// without listening for responses. Returns error if sending fails.
 func sendMulticastAnnouncement(cfg *Config) error {
 	addr, err := net.ResolveUDPAddr("udp", cfg.MulticastAddr)
 	if err != nil {
 		return fmt.Errorf("resolve multicast address: %w", err)
 	}
 
-	conn, err := net.DialUDP("udp", nil, addr)
+	var conn *net.UDPConn
+	if cfg.BindIface != nil {
+		conn, err = net.ListenMulticastUDP("udp", cfg.BindIface, addr)
+	} else {
+		var laddr *net.UDPAddr
+		if cfg.BindIP != "" {
+			laddr = &net.UDPAddr{IP: net.ParseIP(cfg.BindIP)}
+		}
+		conn, err = net.DialUDP("udp", laddr, addr)
+	}
 	if err != nil {
 		return fmt.Errorf("dial multicast: %w", err)
 	}
@@ -61,15 +67,18 @@ func sendMulticastAnnouncement(cfg *Config) error {
 		return fmt.Errorf("marshal announcement: %w", err)
 	}
 
-	if _, err := conn.Write(data); err != nil {
+	if cfg.BindIface != nil {
+		_, err = conn.WriteToUDP(data, addr)
+	} else {
+		_, err = conn.Write(data)
+	}
+	if err != nil {
 		return fmt.Errorf("write announcement: %w", err)
 	}
 	return nil
 }
 
-// announceLoop periodically sends multicast announcements until the context is done.
 func announceLoop(cfg *Config, interval time.Duration, stop <-chan struct{}) {
-	// Send immediately on startup
 	if err := sendMulticastAnnouncement(cfg); err != nil {
 		cfg.Logger.Debugf("Announcement failed: %v\n", err)
 	} else {
@@ -101,7 +110,12 @@ func discoverMulticast(cfg *Config, timeout time.Duration, mu *sync.Mutex, found
 		return
 	}
 
-	conn, err := net.ListenMulticastUDP("udp", nil, addr)
+	var conn *net.UDPConn
+	if cfg.BindIface != nil {
+		conn, err = net.ListenMulticastUDP("udp", cfg.BindIface, addr)
+	} else {
+		conn, err = net.ListenMulticastUDP("udp", nil, addr)
+	}
 	if err != nil {
 		cfg.Logger.Debugf("Multicast listen failed: %v\n", err)
 		return
@@ -110,7 +124,6 @@ func discoverMulticast(cfg *Config, timeout time.Duration, mu *sync.Mutex, found
 
 	cfg.Logger.Debugf("Multicast listening on %s\n", cfg.MulticastAddr)
 
-	// Send announcement
 	announcement := DeviceInfo{
 		Alias:       cfg.Alias,
 		Version:     protocolVersion,
@@ -194,7 +207,6 @@ func registerDevice(cfg *Config, ip string, port int, mu *sync.Mutex, found map[
 				cfg.Logger.Debugf("Register parse error from %s: %v\n", url, err)
 				continue
 			}
-			// Populate missing fields from connection details
 			if peer.Port == 0 {
 				peer.Port = port
 			}
@@ -229,10 +241,6 @@ func newHTTPClientWithTimeout(timeout time.Duration) *http.Client {
 	}
 }
 
-// listenMulticastContinuous listens for UDP multicast packets indefinitely.
-// When it receives an announcement (announce: true) from another device,
-// it sends HTTP POST /register to that device to complete the two-way handshake.
-// This should be run as a background goroutine during receive mode.
 func listenMulticastContinuous(cfg *Config, stop <-chan struct{}) {
 	addr, err := net.ResolveUDPAddr("udp", cfg.MulticastAddr)
 	if err != nil {
@@ -240,7 +248,12 @@ func listenMulticastContinuous(cfg *Config, stop <-chan struct{}) {
 		return
 	}
 
-	conn, err := net.ListenMulticastUDP("udp", nil, addr)
+	var conn *net.UDPConn
+	if cfg.BindIface != nil {
+		conn, err = net.ListenMulticastUDP("udp", cfg.BindIface, addr)
+	} else {
+		conn, err = net.ListenMulticastUDP("udp", nil, addr)
+	}
 	if err != nil {
 		cfg.Logger.Debugf("Multicast listener bind failed: %v\n", err)
 		return
@@ -280,13 +293,12 @@ func listenMulticastContinuous(cfg *Config, stop <-chan struct{}) {
 		}
 
 		if info.Fingerprint == cfg.Fingerprint {
-			continue // skip self
+			continue
 		}
 
 		cfg.Logger.Debugf("Multicast listener: packet from %s alias=%s announce=%v\n", src.IP, info.Alias, info.Announce)
 
 		if info.Announce {
-			// Another device is announcing. Send HTTP POST /register to complete handshake.
 			cfg.Logger.Debugf("Multicast listener: sending register to %s:%d\n", src.IP, info.Port)
 			go func(ip string, port int) {
 				var dummy sync.Mutex
@@ -294,7 +306,6 @@ func listenMulticastContinuous(cfg *Config, stop <-chan struct{}) {
 				registerDevice(cfg, ip, port, &dummy, dummyFound)
 			}(src.IP.String(), info.Port)
 		} else {
-			// This is a response to our announcement. Just log it.
 			cfg.Logger.Debugf("Multicast listener: response from %s (%s)\n", src.IP, info.Alias)
 		}
 	}

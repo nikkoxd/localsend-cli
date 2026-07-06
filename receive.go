@@ -26,8 +26,8 @@ func receive(cfg *Config, announceInterval time.Duration, jsonOut bool) error {
 	// It delivers lines to the currently active prompt, or discards them.
 	var (
 		promptMu     sync.Mutex
-		promptCh     chan string     // nil when no prompt is active
-		promptCancel chan struct{}   // closed to cancel the active prompt
+		promptCh     chan string   // nil when no prompt is active
+		promptCancel chan struct{} // closed to cancel the active prompt
 	)
 
 	go func() {
@@ -303,7 +303,7 @@ func receive(cfg *Config, announceInterval time.Duration, jsonOut bool) error {
 	})
 
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Port),
+		Addr:    fmt.Sprintf("%s:%d", cfg.BindIP, cfg.Port),
 		Handler: mux,
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{cfg.TLSCert},
