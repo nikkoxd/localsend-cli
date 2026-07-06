@@ -28,9 +28,7 @@ Send files to a device:
 localsend-cli send [--json] [--to <alias|ip:port>] [files...]
 ```
 
-The CLI will auto-discover a device if one was not specified with the flag `--to`.
-
-Use flag `--json` to print the result into stdout as JSON.
+The CLI will auto-discover a device if one was not specified with the flag `--to`. Use flag `--json` to print the result into stdout as JSON.
 
 Start a server to receive files:
 
