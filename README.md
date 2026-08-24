@@ -36,6 +36,11 @@ localsend-cli send [--json] [--to <alias|ip:port>] [files...]
 
 The CLI will auto-discover a device if one was not specified with the flag `--to`. Use flag `--json` to print the result into stdout as JSON.
 
+The TLS certificate peers identify this device by is generated on first use and
+stored in `$XDG_DATA_HOME/localsend-cli` (`~/.local/share/localsend-cli` by
+default), so the fingerprint stays the same across runs. Delete that directory
+to get a new identity.
+
 Start a server to receive files:
 
 ```

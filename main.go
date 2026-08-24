@@ -172,10 +172,9 @@ Global options (before or after command):
 		os.Exit(1)
 	}
 
-	logger.Debugf("Generating self-signed TLS certificate...\n")
-	cert, certDER, fingerprint, err := generateSelfSignedCert(cfg.BindIP)
+	cert, certDER, fingerprint, err := loadOrCreateCert(cfg.BindIP, logger)
 	if err != nil {
-		logger.Errorf("Failed to generate TLS certificate: %v\n", err)
+		logger.Errorf("Failed to load TLS certificate: %v\n", err)
 		os.Exit(1)
 	}
 	cfg.TLSCert = cert
