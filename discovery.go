@@ -2,14 +2,29 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	// scanWorkers is the number of concurrent subnet probes.
+	scanWorkers = 64
+	// scanConnectTimeout bounds the TCP pre-check before the HTTPS probe.
+	scanConnectTimeout = 600 * time.Millisecond
+	// scanHTTPTimeout bounds a single /info request.
+	scanHTTPTimeout = 2 * time.Second
+	// scanMinPrefix is the smallest subnet prefix that is swept in full;
+	// anything larger falls back to the /24 around the local address.
+	scanMinPrefix = 22
 )
 
 func discover(cfg *Config, timeout time.Duration) []DiscoveredDevice {
@@ -20,6 +35,12 @@ func discover(cfg *Config, timeout time.Duration) []DiscoveredDevice {
 	wg.Go(func() {
 		discoverMulticast(cfg, timeout, &mu, found)
 	})
+
+	if cfg.Scan {
+		wg.Go(func() {
+			discoverSubnet(cfg, timeout, &mu, found)
+		})
+	}
 
 	wg.Wait()
 
@@ -190,7 +211,7 @@ func registerDevice(cfg *Config, ip string, port int, mu *sync.Mutex, found map[
 	}
 	data, _ := json.Marshal(info)
 
-	client := newHTTPClient()
+	client := newHTTPClient(cfg)
 	for _, proto := range []string{"https", "http"} {
 		url := fmt.Sprintf("%s://%s:%d/api/localsend/v2/register", proto, ip, port)
 		cfg.Logger.Debugf("Registering to %s\n", url)
@@ -226,19 +247,177 @@ func registerDevice(cfg *Config, ip string, port int, mu *sync.Mutex, found map[
 	}
 }
 
-func newHTTPClient() *http.Client {
-	return newHTTPClientWithTimeout(5 * time.Second)
+func newHTTPClient(cfg *Config) *http.Client {
+	return newHTTPClientWithTimeout(cfg, 5*time.Second)
 }
 
-func newHTTPClientWithTimeout(timeout time.Duration) *http.Client {
+// newHTTPClientWithTimeout builds a client that presents our self-signed
+// certificate. LocalSend peers use mutual TLS and reject clients that offer
+// none, so the certificate is required even though peer certs are not verified.
+func newHTTPClientWithTimeout(cfg *Config, timeout time.Duration) *http.Client {
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: true,
+	}
+	if len(cfg.TLSCert.Certificate) > 0 {
+		// Not Certificates: peers ask for a certificate issued by a CA they
+		// list, which our self-signed one never matches, so the default
+		// selection would send nothing and the handshake would fail with
+		// "certificate required". They accept any certificate in practice.
+		cert := cfg.TLSCert
+		tlsCfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return &cert, nil
+		}
+	}
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
+			TLSClientConfig: tlsCfg,
 		},
 	}
+}
+
+// discoverSubnet probes every host on the local subnet with the v2 info
+// endpoint. The mobile apps answer a multicast announcement with an HTTP
+// register call instead of a multicast reply, which never reaches us when the
+// announcement is not seen, so the sweep finds them regardless.
+func discoverSubnet(cfg *Config, timeout time.Duration, mu *sync.Mutex, found map[string]DiscoveredDevice) {
+	targets, own, err := subnetTargets(cfg)
+	if err != nil {
+		cfg.Logger.Debugf("Subnet scan skipped: %v\n", err)
+		return
+	}
+	cfg.Logger.Debugf("Scanning %d hosts around %s on port %d\n", len(targets), own, cfg.Port)
+
+	httpTimeout := scanHTTPTimeout
+	if timeout < httpTimeout {
+		httpTimeout = timeout
+	}
+	client := newHTTPClientWithTimeout(cfg, httpTimeout)
+	defer client.CloseIdleConnections()
+
+	deadline := time.Now().Add(timeout)
+	queue := make(chan string)
+	var wg sync.WaitGroup
+
+	for range scanWorkers {
+		wg.Go(func() {
+			for ip := range queue {
+				if time.Now().After(deadline) {
+					continue
+				}
+				info, ok := probeInfo(cfg, client, ip)
+				if !ok {
+					continue
+				}
+				mu.Lock()
+				key := fmt.Sprintf("%s:%d", ip, info.Port)
+				if _, exists := found[key]; !exists {
+					found[key] = DiscoveredDevice{Info: info, IP: ip, Port: info.Port}
+					cfg.Logger.Infof("Discovered via scan: %s at %s:%d\n", info.Alias, ip, info.Port)
+				}
+				mu.Unlock()
+			}
+		})
+	}
+
+	for _, ip := range targets {
+		queue <- ip
+	}
+	close(queue)
+	wg.Wait()
+	cfg.Logger.Debugf("Subnet scan finished\n")
+}
+
+func probeInfo(cfg *Config, client *http.Client, ip string) (DeviceInfo, bool) {
+	addr := net.JoinHostPort(ip, strconv.Itoa(cfg.Port))
+	conn, err := net.DialTimeout("tcp", addr, scanConnectTimeout)
+	if err != nil {
+		return DeviceInfo{}, false
+	}
+	conn.Close()
+
+	target := fmt.Sprintf("https://%s/api/localsend/v2/info?fingerprint=%s", addr, url.QueryEscape(cfg.Fingerprint))
+	cfg.Logger.Debugf("Probing %s\n", target)
+	resp, err := client.Get(target)
+	if err != nil {
+		cfg.Logger.Debugf("Probe %s failed: %v\n", target, err)
+		return DeviceInfo{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		cfg.Logger.Debugf("Probe %s returned %d\n", target, resp.StatusCode)
+		return DeviceInfo{}, false
+	}
+
+	var info DeviceInfo
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&info); err != nil {
+		cfg.Logger.Debugf("Probe %s parse error: %v\n", target, err)
+		return DeviceInfo{}, false
+	}
+	if info.Alias == "" {
+		return DeviceInfo{}, false
+	}
+	if info.Fingerprint != "" && info.Fingerprint == cfg.Fingerprint {
+		return DeviceInfo{}, false
+	}
+	// The v2 info response carries no port or protocol; it answered on ours.
+	if info.Port == 0 {
+		info.Port = cfg.Port
+	}
+	if info.Protocol == "" {
+		info.Protocol = "https"
+	}
+	return info, true
+}
+
+// subnetTargets lists every host address on the local subnet except our own,
+// and returns the local address alongside them.
+func subnetTargets(cfg *Config) ([]string, string, error) {
+	own := cfg.BindIP
+	if own == "" {
+		detected, err := autoDetectIP()
+		if err != nil {
+			return nil, "", err
+		}
+		own = detected
+	}
+	ownIP := net.ParseIP(own).To4()
+	if ownIP == nil {
+		return nil, "", fmt.Errorf("no IPv4 address to scan from (%q)", own)
+	}
+
+	mask := net.CIDRMask(24, 32)
+	if cfg.BindIface != nil {
+		addrs, _ := cfg.BindIface.Addrs()
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok || !ipnet.IP.To4().Equal(ownIP) {
+				continue
+			}
+			if ones, bits := ipnet.Mask.Size(); bits == 32 && ones >= scanMinPrefix {
+				mask = ipnet.Mask
+			} else {
+				cfg.Logger.Debugf("Subnet /%d too large, scanning a /24 instead\n", ones)
+			}
+			break
+		}
+	}
+
+	network := binary.BigEndian.Uint32(ownIP.Mask(mask))
+	ones, _ := mask.Size()
+	broadcast := network | ^uint32(0)>>ones
+	self := binary.BigEndian.Uint32(ownIP)
+
+	var targets []string
+	for host := network + 1; host < broadcast; host++ {
+		if host == self {
+			continue
+		}
+		var buf [4]byte
+		binary.BigEndian.PutUint32(buf[:], host)
+		targets = append(targets, net.IP(buf[:]).String())
+	}
+	return targets, own, nil
 }
 
 func listenMulticastContinuous(cfg *Config, stop <-chan struct{}) {

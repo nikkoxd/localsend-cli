@@ -25,6 +25,7 @@ func main() {
 		announceInterval = flag.Duration("announce", 5*time.Second, "Interval between multicast announcements in receive mode")
 		bindIP           = flag.String("bind", "", "IP address to bind to (auto-detected if empty)")
 		iface            = flag.String("iface", "", "Network interface to use (e.g., eth0, wlan0, en0)")
+		scan             = flag.Bool("scan", true, "Also probe every host on the local subnet (finds devices that never answer multicast)")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage: localsend-cli [options] <command> [options] [files...]
@@ -141,6 +142,7 @@ Global options (before or after command):
 		DeviceModel:   "Go CLI",
 		Logger:        logger,
 		BindIP:        *bindIP,
+		Scan:          *scan,
 	}
 
 	// Find interface for BindIP (needed for multicast)

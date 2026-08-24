@@ -22,6 +22,7 @@ type Config struct {
 	Logger        *Logger
 	BindIP        string
 	BindIface     *net.Interface
+	Scan          bool
 }
 
 func defaultDownloadDir() string {

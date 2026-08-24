@@ -22,6 +22,12 @@ localsend-cli discover [--json] [--timeout <duration>]
 
 Use flag `--json` to print the info about discovered devices into stdout as JSON.
 
+Discovery runs a multicast announcement and, in parallel, a sweep of the local
+subnet that asks every host for `/api/localsend/v2/info`. The sweep is there
+because the mobile apps reply to an announcement with an HTTP register call to
+the announcing device rather than with a multicast packet, so they stay
+invisible to multicast-only discovery. Pass `--scan=false` to disable it.
+
 Send files to a device:
 
 ```

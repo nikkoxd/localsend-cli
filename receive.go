@@ -70,6 +70,27 @@ func receive(cfg *Config, announceInterval time.Duration, jsonOut bool) error {
 		activeSession *ReceiveSession
 	)
 
+	// Answers the subnet sweep other devices use instead of multicast.
+	mux.HandleFunc("/api/localsend/v2/info", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			cfg.Logger.Debugf("Info: method not allowed: %s\n", r.Method)
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		cfg.Logger.Debugf("Info request from %s (fingerprint=%s)\n", r.RemoteAddr, r.URL.Query().Get("fingerprint"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(DeviceInfo{
+			Alias:       cfg.Alias,
+			Version:     protocolVersion,
+			DeviceType:  cfg.DeviceType,
+			DeviceModel: cfg.DeviceModel,
+			Fingerprint: cfg.Fingerprint,
+			Port:        cfg.Port,
+			Protocol:    cfg.Protocol,
+			Download:    false,
+		})
+	})
+
 	mux.HandleFunc("/api/localsend/v2/register", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			cfg.Logger.Debugf("Register: method not allowed: %s\n", r.Method)

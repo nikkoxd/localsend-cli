@@ -24,9 +24,9 @@ type SendResult struct {
 
 func sendFiles(cfg *Config, targetAddr string, files []string, pin string, jsonOut bool) error {
 	// Use a longer timeout for prepare-upload since receiver waits for stdin
-	prepareClient := newHTTPClientWithTimeout(60*time.Second)
+	prepareClient := newHTTPClientWithTimeout(cfg, 60*time.Second)
 	// Normal client for uploads
-	client := newHTTPClient()
+	client := newHTTPClient(cfg)
 
 	fileMap := make(map[string]FileMetadata)
 	idToPath := make(map[string]string)
